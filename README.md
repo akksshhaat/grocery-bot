@@ -19,7 +19,7 @@ Voice-note driven grocery automation for Blinkit. The backend can transcribe Hin
 ```text
 Backend/
   app.py              # Audio conversion, transcription, grocery extraction
-  blinkit_bot.py      # Blinkit browser automation, receipt rendering, COD checkout
+  blinkit/            # Blinkit browser automation, cart, checkout, receipt classes
   order_backends.py   # Ordering backend wrapper
   telegram_bot.py     # Telegram bot entrypoint
   swiggyMCP.py        # Swiggy provider scaffold
@@ -131,7 +131,8 @@ python Backend/app.py
 ### Create a Blinkit cart from local audio
 
 ```bash
-python Backend/blinkit_bot.py
+cd Backend
+python -m blinkit.bot
 ```
 
 This opens Chromium with a persistent Blinkit profile under `Backend/blinkit-user-data/`. Log in once if Blinkit asks for it.
