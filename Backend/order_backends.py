@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from blinkit_bot import run_blinkit_order
+from blinkit_bot import run_blinkit_checkout_cod, run_blinkit_order
 
 
 @dataclass
@@ -22,6 +22,13 @@ class BlinkitProvider:
             "data": data,
         }
 
+    def checkout_cod(self, address_hint):
+        data = run_blinkit_checkout_cod(address_hint)
+        return {
+            "success": True,
+            "data": data,
+        }
+
 
 class OrderingBackend:
     def __init__(self):
@@ -36,5 +43,17 @@ class OrderingBackend:
             screenshot_path=screenshot_path,
             added_items=data.get("added_items", []),
             failed_items=data.get("failed_items", []),
+            raw=data,
+        )
+
+    def checkout_cod(self, address_hint):
+        blinkit_result = self.blinkit.checkout_cod(address_hint)
+        data = blinkit_result["data"]
+        return OrderResult(
+            provider="blinkit",
+            success=blinkit_result.get("success", False),
+            screenshot_path=None,
+            added_items=[],
+            failed_items=[],
             raw=data,
         )

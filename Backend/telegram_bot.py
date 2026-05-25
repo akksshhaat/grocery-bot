@@ -47,7 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Send me a Hindi grocery voice note. I will create a Blinkit cart and send a screenshot for approval.\n\n"
-        "Reply OK to approve or CANCEL to cancel. Checkout is disabled for now."
+        "After the cart is ready, send an address hint like 'flat 1202 tower A', then reply OK to place a COD order."
     )
 
 
@@ -128,9 +128,13 @@ async def process_audio_batch(chat_id, bot):
             "items": items,
             "screenshot_path": str(screenshot_path),
             "result": result,
+            "address_hint": None,
         }
 
-        caption = "Blinkit cart is ready. Reply OK to approve or CANCEL to cancel.\n\nCheckout is disabled for now."
+        caption = (
+            "Blinkit cart is ready. Send address hint, then reply OK to place COD order.\n\n"
+            "Reply CANCEL to cancel."
+        )
         if result.failed_items:
             failed = "\n".join(f"- {entry['item']}: {entry['error']}" for entry in result.failed_items)
             caption += "\n\nSome items failed:\n" + failed
@@ -193,15 +197,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
-    text = (update.message.text or "").strip().upper()
+    raw_text = (update.message.text or "").strip()
+    text = raw_text.upper()
 
     if text == "OK":
         if chat_id not in pending_approvals:
             await update.message.reply_text("No cart is waiting for approval.")
             return
 
-        pending_approvals.pop(chat_id, None)
-        await update.message.reply_text("Approved. Checkout is currently disabled for safety.")
+        approval = pending_approvals.get(chat_id, {})
+        address_hint = approval.get("address_hint")
+        if not address_hint:
+            await update.message.reply_text(
+                "Send the delivery address hint first, for example: flat 1202 tower A. Then reply OK."
+            )
+            return
+
+        await update.message.reply_text("Approved. Selecting saved address and placing COD order...")
+        try:
+            checkout_result = await asyncio.to_thread(ordering_backend.checkout_cod, address_hint)
+            pending_approvals.pop(chat_id, None)
+            address_result = checkout_result.raw.get("address_result", {})
+            matched_address = address_result.get("matched_address", "")
+            message = "COD order placed."
+            if matched_address:
+                message += "\nMatched address:\n" + matched_address
+            await update.message.reply_text(message)
+        except Exception as exc:
+            await update.message.reply_text(f"Checkout failed: {exc}")
         return
 
     if text == "CANCEL":
@@ -210,6 +233,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Cancelled. No order will be placed.")
         else:
             await update.message.reply_text("No cart is waiting for approval.")
+        return
+
+    if chat_id in pending_approvals and raw_text:
+        pending_approvals[chat_id]["address_hint"] = raw_text
+        await update.message.reply_text(
+            f"Address hint saved: {raw_text}\nReply OK to place COD order, or CANCEL to cancel."
+        )
         return
 
     await update.message.reply_text("Send a voice note, or reply OK / CANCEL when a cart is waiting.")
