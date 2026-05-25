@@ -173,14 +173,13 @@ async def process_audio_batch(chat_id, bot):
             summary_lines.append("Bill details:")
             for line in bill_lines[:20]:
                 summary_lines.append(f"- {line}")
-        await bot.send_message(chat_id=chat_id, text="\n".join(summary_lines))
-
         screenshot_parts = result.raw.get("screenshot_paths", [])
         for index, part_path in enumerate(screenshot_parts):
             with Path(part_path).open("rb") as screenshot:
                 part_caption = caption if index == 0 else f"Cart screenshot part {index + 1}"
                 await bot.send_photo(chat_id=chat_id, photo=screenshot, caption=part_caption)
             safe_unlink(part_path)
+        await bot.send_message(chat_id=chat_id, text="\n".join(summary_lines))
     except Exception as exc:
         await bot.send_message(chat_id=chat_id, text=f"Batch failed: {exc}")
     finally:

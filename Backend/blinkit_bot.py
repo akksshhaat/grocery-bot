@@ -1,5 +1,6 @@
 import json
 import os
+from html import escape
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -9,6 +10,12 @@ from app import extract_items_from_audio_files, find_audio_files
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CART_ROOT_SELECTOR = '[class*="Cart___StyledDiv-sc-1ptvk5t-1"]'
+CART_TITLE_SELECTOR = '[class*="CartWrapper__Title"]'
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+    "Mobile/15E148 Safari/604.1"
+)
 
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
@@ -173,18 +180,122 @@ def choose_product_option(item_name, options):
     print(f"No good product match found for: {item_name}")
     return 0
 
+def click_cart_button(page, timeout=3000):
+    selectors = [
+        '[class*="CartButton__Button"]',
+        'text=/^View\\s*cart$/i',
+        'text=/^My\\s*Cart$/i',
+        'text=/\\bCart\\b/i',
+    ]
+    for selector in selectors:
+        try:
+            page.locator(selector).first.click(timeout=timeout)
+            return True
+        except Exception:
+            pass
+
+    return page.evaluate(
+        """() => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            const candidates = Array
+                .from(document.querySelectorAll('button, a, div, span'))
+                .filter((el) => {
+                    if (!visible(el)) return false;
+                    const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const className = String(el.className || '').toLowerCase();
+                    if (className.includes('cartproduct')) return false;
+                    return text === 'view cart' ||
+                        text === 'my cart' ||
+                        text.includes('view cart') ||
+                        className.includes('cartbutton') ||
+                        className.includes('checkoutstrip');
+                });
+
+            const target = candidates[0];
+            if (!target) return false;
+            const clickable = target.closest('button, a') || target;
+            clickable.click();
+            return true;
+        }"""
+    )
+
+def wait_for_cart_panel(page, timeout=5000):
+    try:
+        page.get_by_text("My Cart", exact=True).wait_for(timeout=timeout)
+        return True
+    except Exception:
+        pass
+
+    try:
+        page.locator(f"{CART_TITLE_SELECTOR}:visible").first.wait_for(timeout=timeout)
+        return True
+    except Exception:
+        pass
+
+    try:
+        page.locator(f"{CART_ROOT_SELECTOR}:visible").first.wait_for(timeout=timeout)
+        return True
+    except Exception:
+        pass
+
+    return page.evaluate(
+        """() => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            return Array
+                .from(document.querySelectorAll('div, span, h1, h2'))
+                .some((el) => {
+                    if (!visible(el)) return false;
+                    const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    const className = String(el.className || '').toLowerCase();
+                    return text === 'my cart' ||
+                        (className.includes('cartwrapper__title') && text.includes('cart'));
+                });
+        }"""
+    )
+
+def leave_cart_screen(page):
+    selectors = [
+        'text=/^Start\\s*Shopping$/i',
+        '[class*="CartWrapper__Icon"]',
+        'text=/^←$/',
+        'text=/^‹$/',
+    ]
+    for selector in selectors:
+        try:
+            page.locator(selector).first.click(timeout=1500)
+            page.wait_for_timeout(1000)
+            return True
+        except Exception:
+            pass
+
+    try:
+        page.go_back(wait_until="domcontentloaded", timeout=3000)
+        page.wait_for_timeout(1000)
+        return True
+    except Exception:
+        pass
+
+    try:
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(500)
+        return True
+    except Exception:
+        return False
+
 def empty_cart(page):
     print("\nEmptying cart...")
 
-    try:
-        page.locator('[class*="CartButton__Button"]').click(timeout=3000)
-    except Exception:
+    if not click_cart_button(page):
         print("Cart is already empty or cart button is not visible.")
         return
 
-    try:
-        page.get_by_text("My Cart", exact=True).wait_for(timeout=5000)
-    except Exception:
+    if not wait_for_cart_panel(page):
         print("Cart did not open.")
         return
 
@@ -194,7 +305,7 @@ def empty_cart(page):
 
     if cart_count == 0:
         print("Cart is already empty.")
-        page.keyboard.press("Escape")
+        leave_cart_screen(page)
         return
 
     print("Cart items before clearing:")
@@ -235,8 +346,7 @@ def empty_cart(page):
         print("No removable cart items found.")
 
     try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
+        leave_cart_screen(page)
     except Exception:
         pass
 
@@ -273,11 +383,21 @@ def click_product_add_button(page, option_index):
 def add_item(page, item_name):
     print(f"\nSearching for: {item_name}")
     try:
+        if wait_for_cart_panel(page, timeout=800):
+            leave_cart_screen(page)
+    except Exception:
+        pass
+
+    try:
         # Click search bar on homepage when we are not already on the search page.
         page.locator('a[href="/s/"]').click(timeout=1500)
         page.wait_for_timeout(3000)
     except Exception:
-        pass
+        try:
+            page.goto("https://blinkit.com/s/", wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+        except Exception:
+            pass
 
     # Real search input on search page
     search_input = page.locator("input").first
@@ -304,10 +424,54 @@ def add_item(page, item_name):
 
 def open_cart(page):
     try:
-        page.locator('[class*="CartButton__Button"]').click(timeout=3000)
-        page.get_by_text("My Cart", exact=True).wait_for(timeout=5000)
+        if not click_cart_button(page):
+            return False
+        if not wait_for_cart_panel(page):
+            return False
         page.wait_for_timeout(1000)
         return True
+    except Exception:
+        return False
+
+def clear_delivery_tip(page):
+    print("Clearing delivery tip if selected...")
+
+    selectors = [
+        '[class*="ClearTipSelected"]',
+        'text=/^Clear$/i',
+    ]
+    for selector in selectors:
+        try:
+            page.locator(selector).first.click(timeout=1500)
+            page.wait_for_timeout(1000)
+            return True
+        except Exception:
+            pass
+
+    try:
+        return page.evaluate(
+            """() => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const tipRoots = Array
+                    .from(document.querySelectorAll('[class*="AddTip"], div'))
+                    .filter((el) => visible(el) && /tip your delivery partner/i.test(el.innerText || ''));
+
+                for (const root of tipRoots) {
+                    const clear = Array
+                        .from(root.querySelectorAll('button, div, span'))
+                        .find((el) => visible(el) && (el.innerText || '').trim().toLowerCase() === 'clear');
+                    if (clear) {
+                        clear.click();
+                        return true;
+                    }
+                }
+
+                return false;
+            }"""
+        )
     except Exception:
         return False
 
@@ -398,6 +562,309 @@ def capture_cart_screenshots(page, screenshot_path):
     )
     return screenshot_paths
 
+def money_number(value):
+    if not value:
+        return 0
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    return int(digits) if digits else 0
+
+def html_text(value):
+    return escape(str(value or ""), quote=True)
+
+def build_receipt_html(order_summary, failed_items):
+    cart_items = order_summary.get("cart_item_breakup", [])
+    bill_lines = order_summary.get("bill_breakup", [])
+    delivery_eta = order_summary.get("delivery_eta") or "Delivery timing shown in Blinkit"
+    shipment_count = order_summary.get("shipment_count") or ""
+    total_savings = order_summary.get("total_savings") or ""
+    donation = order_summary.get("donation") or {}
+    checkout_total = order_summary.get("checkout_total") or ""
+
+    item_rows = []
+    for item in cart_items:
+        name = html_text(item.get("name"))
+        variant = html_text(item.get("variant"))
+        quantity = html_text(item.get("quantity", 1))
+        price = html_text(item.get("price"))
+        mrp = html_text(item.get("mrp"))
+        savings = html_text(item.get("savings"))
+        meta_parts = [part for part in [variant, f"Qty {quantity}"] if part]
+        price_meta = ""
+        if mrp:
+            price_meta = f'<span class="mrp">MRP {mrp}</span>'
+        if savings and savings != "₹0":
+            price_meta += f'<span class="save">Saved {savings}</span>'
+        item_rows.append(
+            f"""
+            <div class="item">
+                <div class="item-main">
+                    <div class="item-name">{name}</div>
+                    <div class="item-meta">{' • '.join(meta_parts)}</div>
+                </div>
+                <div class="item-price">
+                    <div class="price">{price}</div>
+                    <div class="price-meta">{price_meta}</div>
+                </div>
+            </div>
+            """
+        )
+
+    if not item_rows:
+        item_rows.append('<div class="empty">No cart items found.</div>')
+
+    bill_rows = []
+    for line in bill_lines:
+        label = html_text(line.get("label"))
+        amount = html_text(line.get("amount") or line.get("details"))
+        if not label or not amount:
+            continue
+        is_total = label.lower() == "grand total"
+        bill_rows.append(
+            f"""
+            <div class="bill-row {'grand' if is_total else ''}">
+                <span>{label}</span>
+                <strong>{amount}</strong>
+            </div>
+            """
+        )
+
+    if donation.get("amount"):
+        bill_rows.append(
+            f"""
+            <div class="bill-row">
+                <span>{html_text(donation.get("label") or "Donation")}</span>
+                <strong>{html_text(donation.get("amount"))}</strong>
+            </div>
+            """
+        )
+
+    if checkout_total and not any((line.get("label") or "").lower() == "grand total" for line in bill_lines):
+        bill_rows.append(
+            f"""
+            <div class="bill-row grand">
+                <span>Total</span>
+                <strong>{html_text(checkout_total)}</strong>
+            </div>
+            """
+        )
+
+    failed_rows = []
+    for entry in failed_items or []:
+        failed_rows.append(
+            f"<li>{html_text(entry.get('item'))}: {html_text(entry.get('error'))}</li>"
+        )
+    failed_section = ""
+    if failed_rows:
+        failed_section = f"""
+        <section class="failed">
+            <h2>Items not added</h2>
+            <ul>{''.join(failed_rows)}</ul>
+        </section>
+        """
+
+    savings_pill = f'<div class="pill">Saved {html_text(total_savings)}</div>' if total_savings else ""
+    subtitle = " • ".join(html_text(part) for part in [delivery_eta, shipment_count] if part)
+
+    return f"""
+    <!doctype html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            * {{
+                box-sizing: border-box;
+            }}
+            body {{
+                margin: 0;
+                background: #eef2f7;
+                color: #111827;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+            }}
+            .receipt {{
+                width: 390px;
+                min-height: 100px;
+                background: #ffffff;
+                padding: 18px;
+            }}
+            .header {{
+                border-bottom: 1px solid #e5e7eb;
+                padding-bottom: 14px;
+            }}
+            .topline {{
+                align-items: flex-start;
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+            }}
+            h1 {{
+                font-size: 22px;
+                line-height: 1.2;
+                margin: 0 0 6px;
+            }}
+            .subtitle {{
+                color: #4b5563;
+                font-size: 13px;
+                line-height: 1.35;
+            }}
+            .pill {{
+                background: #e8f7ed;
+                border: 1px solid #bfe8cb;
+                border-radius: 999px;
+                color: #137333;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 6px 9px;
+                white-space: nowrap;
+            }}
+            section {{
+                padding: 14px 0;
+                border-bottom: 1px solid #eef0f3;
+            }}
+            h2 {{
+                font-size: 14px;
+                margin: 0 0 10px;
+                text-transform: uppercase;
+                letter-spacing: 0.04em;
+                color: #6b7280;
+            }}
+            .item {{
+                align-items: flex-start;
+                display: flex;
+                gap: 12px;
+                justify-content: space-between;
+                padding: 10px 0;
+            }}
+            .item + .item {{
+                border-top: 1px solid #f3f4f6;
+            }}
+            .item-main {{
+                min-width: 0;
+                width: 65%;
+            }}
+            .item-name {{
+                font-size: 14px;
+                font-weight: 700;
+                line-height: 1.28;
+            }}
+            .item-meta {{
+                color: #6b7280;
+                font-size: 12px;
+                margin-top: 4px;
+            }}
+            .item-price {{
+                min-width: 95px;
+                text-align: right;
+            }}
+            .price {{
+                font-size: 15px;
+                font-weight: 800;
+            }}
+            .price-meta {{
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+                margin-top: 3px;
+            }}
+            .mrp {{
+                color: #6b7280;
+                font-size: 11px;
+                text-decoration: line-through;
+            }}
+            .save {{
+                color: #137333;
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            .bill-row {{
+                align-items: center;
+                display: flex;
+                justify-content: space-between;
+                padding: 7px 0;
+                color: #374151;
+                font-size: 14px;
+            }}
+            .bill-row.grand {{
+                border-top: 1px solid #d1d5db;
+                color: #111827;
+                font-size: 18px;
+                font-weight: 800;
+                margin-top: 8px;
+                padding-top: 12px;
+            }}
+            .footer {{
+                background: #0b8f24;
+                border-radius: 10px;
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: 800;
+                margin-top: 14px;
+                padding: 13px 14px;
+                text-align: center;
+            }}
+            .empty {{
+                background: #f9fafb;
+                border-radius: 8px;
+                color: #6b7280;
+                font-size: 14px;
+                padding: 14px;
+                text-align: center;
+            }}
+            .failed {{
+                background: #fff7ed;
+                border: 1px solid #fed7aa;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 12px;
+            }}
+            .failed h2 {{
+                color: #9a3412;
+            }}
+            .failed ul {{
+                margin: 0;
+                padding-left: 18px;
+                color: #7c2d12;
+                font-size: 12px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="receipt" id="receipt">
+            <div class="header">
+                <div class="topline">
+                    <div>
+                        <h1>Blinkit cart review</h1>
+                        <div class="subtitle">{subtitle}</div>
+                    </div>
+                    {savings_pill}
+                </div>
+            </div>
+            <section>
+                <h2>Items</h2>
+                {''.join(item_rows)}
+            </section>
+            <section>
+                <h2>Bill details</h2>
+                {''.join(bill_rows) if bill_rows else '<div class="empty">Bill details not found.</div>'}
+            </section>
+            {failed_section}
+            <div class="footer">Checkout disabled until approval</div>
+        </div>
+    </body>
+    </html>
+    """
+
+def render_receipt_screenshot(context, order_summary, failed_items, screenshot_path):
+    receipt_page = context.new_page()
+    try:
+        receipt_page.set_viewport_size({"width": 430, "height": 1200})
+        receipt_page.set_content(build_receipt_html(order_summary, failed_items), wait_until="load")
+        receipt = receipt_page.locator("#receipt")
+        receipt.wait_for(timeout=3000)
+        receipt.screenshot(path=screenshot_path)
+        return screenshot_path
+    finally:
+        receipt_page.close()
+
 def extract_order_summary(page):
     return page.evaluate(
         """() => {
@@ -416,7 +883,19 @@ def extract_order_summary(page):
                 }) || Array
                 .from(document.querySelectorAll('[class*="Cart___StyledDiv-sc-1ptvk5t-1"]'))
                 .find(visible);
-            if (!root) return { cart_items: [], bill_lines: [], cart_item_breakup: [], bill_breakup: [] };
+            if (!root) {
+                return {
+                    cart_items: [],
+                    bill_lines: [],
+                    cart_item_breakup: [],
+                    bill_breakup: [],
+                    delivery_eta: '',
+                    shipment_count: '',
+                    total_savings: '',
+                    checkout_total: '',
+                    donation: {},
+                };
+            }
 
             const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim();
             const currency = (text) => {
@@ -432,6 +911,7 @@ def extract_order_summary(page):
                 const el = node.querySelector(selector);
                 return el ? clean(el.innerText || el.textContent) : '';
             };
+            const firstText = (selector) => textFrom(root, selector);
 
             const cartItems = Array
                 .from(root.querySelectorAll('[class*="CartProduct__Container"]'))
@@ -474,11 +954,23 @@ def extract_order_summary(page):
                 })
                 .filter((line) => line.label && (line.amount || line.details));
 
+            const donationContainer = root.querySelector('[class*="FeedingIndiaComponent__Container"]');
+            const donation = donationContainer ? {
+                label: textFrom(donationContainer, '[class*="FeedingIndiaComponent__Title"]') || 'Donation',
+                amount: currency(textFrom(donationContainer, '[class*="FeedingIndiaComponent__Amount"]')),
+                selected: Boolean(donationContainer.querySelector('[class*="icon-check"]')),
+            } : {};
+
             return {
                 cart_items: cartItems,
                 bill_lines: billLines,
                 cart_item_breakup: cartItemBreakup,
                 bill_breakup: billBreakup,
+                delivery_eta: firstText('[class*="HeaderStrip__Heading"]'),
+                shipment_count: firstText('[class*="HeaderStrip__Hightlight"]'),
+                total_savings: currency(firstText('[class*="TotalSaving__TotalSavings"]')),
+                checkout_total: currency(firstText('[class*="CheckoutStrip__NetPriceText"]')),
+                donation,
             };
         }"""
     )
@@ -490,7 +982,12 @@ def run_blinkit_order(items, screenshot_path=None):
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=os.path.join(BASE_DIR, "blinkit-user-data"),
-            headless=False
+            headless=False,
+            viewport={"width": 390, "height": 844},
+            device_scale_factor=2,
+            is_mobile=True,
+            has_touch=True,
+            user_agent=MOBILE_USER_AGENT,
         )
         page = context.new_page()
         print("Opening Blinkit...")
@@ -518,16 +1015,42 @@ def run_blinkit_order(items, screenshot_path=None):
 
         cart_opened = open_cart(page)
         if not cart_opened:
-            page.locator('[class*="CartButton__Button"]').click(timeout=3000)
-            page.wait_for_timeout(1200)
-            cart_opened = True
+            cart_opened = click_cart_button(page)
+            if cart_opened:
+                page.wait_for_timeout(1200)
+                cart_opened = wait_for_cart_panel(page, timeout=5000)
         screenshot_paths = []
-        order_summary = {"cart_items": [], "bill_lines": []}
+        raw_cart_screenshot_paths = []
+        receipt_path = None
+        order_summary = {
+            "cart_items": [],
+            "bill_lines": [],
+            "cart_item_breakup": [],
+            "bill_breakup": [],
+        }
         if cart_opened:
+            clear_delivery_tip(page)
             order_summary = extract_order_summary(page)
             if screenshot_path:
                 os.makedirs(os.path.dirname(screenshot_path), exist_ok=True)
-                screenshot_paths = capture_cart_screenshots(page, screenshot_path)
+                try:
+                    receipt_path = render_receipt_screenshot(
+                        context,
+                        order_summary,
+                        failed_items,
+                        screenshot_path,
+                    )
+                    screenshot_paths = [receipt_path]
+                except Exception as e:
+                    print("Receipt screenshot failed. Falling back to cart screenshots.")
+                    print(e)
+                    raw_cart_screenshot_paths = capture_cart_screenshots(page, screenshot_path)
+                    screenshot_paths = raw_cart_screenshot_paths
+
+                if os.getenv("BLINKIT_DEBUG_CART_SCREENSHOTS") == "1" and receipt_path:
+                    base, ext = os.path.splitext(screenshot_path)
+                    raw_path = f"{base}_cart{ext or '.png'}"
+                    raw_cart_screenshot_paths = capture_cart_screenshots(page, raw_path)
 
         print("\nFinished!")
         page.wait_for_timeout(5000)
@@ -539,6 +1062,8 @@ def run_blinkit_order(items, screenshot_path=None):
         "failed_items": failed_items,
         "screenshot_path": screenshot_path,
         "screenshot_paths": screenshot_paths,
+        "receipt_path": receipt_path,
+        "raw_cart_screenshot_paths": raw_cart_screenshot_paths,
         "cart_opened": cart_opened,
         "order_summary": order_summary,
     }
