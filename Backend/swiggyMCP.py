@@ -3,7 +3,7 @@ import os
 
 import httpx
 
-from blinkit_bot import item_search_name
+from blinkit import TextMatcher
 
 
 class SwiggyMCPProvider:
@@ -26,7 +26,7 @@ class SwiggyMCPProvider:
         payload = {
             "items": [
                 {
-                    "name": item_search_name(item),
+                    "name": TextMatcher.item_search_name(item),
                     "quantity": item.get("quantity", "1") if isinstance(item, dict) else "1",
                     "raw_item": item,
                 }

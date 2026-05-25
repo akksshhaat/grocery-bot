@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from blinkit_bot import run_blinkit_checkout_cod, run_blinkit_order
+from blinkit import BlinkitOrderBot
 
 
 @dataclass
@@ -15,15 +15,18 @@ class OrderResult:
 
 
 class BlinkitProvider:
+    def __init__(self):
+        self.bot = BlinkitOrderBot()
+
     def create_cart(self, items, screenshot_path):
-        data = run_blinkit_order(items, screenshot_path=screenshot_path)
+        data = self.bot.run_order(items, screenshot_path=screenshot_path)
         return {
             "success": True,
             "data": data,
         }
 
     def checkout_cod(self, address_hint):
-        data = run_blinkit_checkout_cod(address_hint)
+        data = self.bot.checkout_cod(address_hint)
         return {
             "success": True,
             "data": data,
