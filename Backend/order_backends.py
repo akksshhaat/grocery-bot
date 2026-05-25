@@ -32,6 +32,20 @@ class BlinkitProvider:
             "data": data,
         }
 
+    def remove_item(self, item_name, screenshot_path):
+        data = self.bot.remove_item(item_name, screenshot_path=screenshot_path)
+        return {
+            "success": True,
+            "data": data,
+        }
+
+    def add_item(self, item_name, quantity, screenshot_path):
+        data = self.bot.add_item(item_name, quantity=quantity, screenshot_path=screenshot_path)
+        return {
+            "success": True,
+            "data": data,
+        }
+
 
 class OrderingBackend:
     def __init__(self):
@@ -58,5 +72,29 @@ class OrderingBackend:
             screenshot_path=None,
             added_items=[],
             failed_items=[],
+            raw=data,
+        )
+
+    def remove_item(self, item_name, screenshot_path):
+        blinkit_result = self.blinkit.remove_item(item_name, screenshot_path=screenshot_path)
+        data = blinkit_result["data"]
+        return OrderResult(
+            provider="blinkit",
+            success=blinkit_result.get("success", False),
+            screenshot_path=screenshot_path,
+            added_items=[],
+            failed_items=[],
+            raw=data,
+        )
+
+    def add_item(self, item_name, quantity, screenshot_path):
+        blinkit_result = self.blinkit.add_item(item_name, quantity, screenshot_path=screenshot_path)
+        data = blinkit_result["data"]
+        return OrderResult(
+            provider="blinkit",
+            success=blinkit_result.get("success", False),
+            screenshot_path=screenshot_path,
+            added_items=data.get("added_items", []),
+            failed_items=data.get("failed_items", []),
             raw=data,
         )

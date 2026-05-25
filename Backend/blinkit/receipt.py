@@ -288,7 +288,7 @@ def build_receipt_html(order_summary, failed_items):
                 {''.join(bill_rows) if bill_rows else '<div class="empty">Bill details not found.</div>'}
             </section>
             {failed_section}
-            <div class="footer">Send address hint, then OK for COD checkout</div>
+            <div class="footer">Reply OK to continue, or CANCEL to stop</div>
         </div>
     </body>
     </html>

@@ -1,6 +1,7 @@
 import os
 
 from .constants import CART_ROOT_SELECTOR, CART_TITLE_SELECTOR
+from .text_matching import fuzzy_text_score
 
 def click_cart_button(page, timeout=3000):
     selectors = [
@@ -183,6 +184,61 @@ def open_cart(page):
     except Exception:
         return False
 
+def remove_cart_item(page, item_name):
+    if not wait_for_cart_panel(page, timeout=2000) and not open_cart(page):
+        raise RuntimeError("Could not open cart.")
+
+    page.wait_for_timeout(1000)
+    rows = page.locator('[class*="CartProduct__Container"]')
+    row_count = rows.count()
+    if row_count == 0:
+        raise RuntimeError("Cart is empty.")
+
+    best_index = -1
+    best_score = 0
+    best_text = ""
+    for index in range(row_count):
+        row_text = rows.nth(index).inner_text(timeout=1000).replace("\n", " ")
+        score = fuzzy_text_score(item_name, row_text)
+        if score > best_score:
+            best_index = index
+            best_score = score
+            best_text = row_text
+
+    if best_index < 0 or best_score <= 0:
+        raise RuntimeError(f"Could not find item in cart: {item_name}")
+
+    print(f"Removing matching cart item: {best_text}")
+
+    removed_clicks = 0
+    for _ in range(25):
+        rows = page.locator('[class*="CartProduct__Container"]')
+        if best_index >= rows.count():
+            break
+
+        row = rows.nth(best_index)
+        current_text = row.inner_text(timeout=1000).replace("\n", " ")
+        if fuzzy_text_score(item_name, current_text) <= 0:
+            break
+
+        minus_button = row.locator('[class*="AddToCart___StyledDiv-sc"]').first
+        try:
+            minus_button.click(timeout=2000, force=True)
+        except Exception as exc:
+            raise RuntimeError(f"Could not click remove button for {item_name}") from exc
+
+        removed_clicks += 1
+        page.wait_for_timeout(900)
+
+    if removed_clicks == 0:
+        raise RuntimeError(f"Could not remove item: {item_name}")
+
+    return {
+        "requested_item": item_name,
+        "matched_item_text": best_text,
+        "remove_clicks": removed_clicks,
+    }
+
 def clear_delivery_tip(page):
     print("Clearing delivery tip if selected...")
 
@@ -317,6 +373,7 @@ class CartManager:
     wait_for_cart_panel = staticmethod(wait_for_cart_panel)
     leave_cart_screen = staticmethod(leave_cart_screen)
     empty_cart = staticmethod(empty_cart)
+    remove_item = staticmethod(remove_cart_item)
     open_cart = staticmethod(open_cart)
     clear_delivery_tip = staticmethod(clear_delivery_tip)
     capture_screenshots = staticmethod(capture_cart_screenshots)

@@ -114,6 +114,70 @@ def extract_grocery_items(transcript):
     )
     return response.choices[0].message.content
 
+def parse_cart_edit_command(message):
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": """
+You classify short Telegram messages for a grocery cart approval flow.
+
+Return STRICT JSON only.
+
+Supported actions:
+{
+  "action": "add_item",
+  "item_name": "maggi",
+  "quantity": "2"
+}
+
+or:
+{
+  "action": "remove_item",
+  "item_name": "diet coke",
+  "quantity": ""
+}
+
+or:
+{
+  "action": "none",
+  "item_name": "",
+  "quantity": ""
+}
+
+Rules:
+* Use add_item only when the user clearly wants an item added/put/included in the cart.
+* Use remove_item only when the user clearly wants an item removed/deleted/taken out from the cart.
+* Extract the grocery/product name in simple English.
+* For add_item, extract quantity if mentioned. If missing, use "1".
+* For remove_item, quantity can be empty unless the user clearly mentions removing a specific count.
+* If the message is an address hint, approval, cancellation, greeting, question, or unclear, return action none.
+* Do not invent an item name.
+""",
+            },
+            {
+                "role": "user",
+                "content": message,
+            },
+        ],
+        temperature=0,
+    )
+
+    try:
+        parsed = json.loads(response.choices[0].message.content)
+    except Exception:
+        return {"action": "none", "item_name": "", "quantity": ""}
+
+    if parsed.get("action") not in {"add_item", "remove_item"} or not parsed.get("item_name"):
+        return {"action": "none", "item_name": "", "quantity": ""}
+
+    return {
+        "action": parsed.get("action"),
+        "item_name": str(parsed.get("item_name", "")).strip(),
+        "quantity": str(parsed.get("quantity") or ("1" if parsed.get("action") == "add_item" else "")).strip(),
+    }
+
 def parse_grocery_json(grocery_output):
     cleaned_output = grocery_output.strip()
     if cleaned_output.startswith("```"):
@@ -121,6 +185,44 @@ def parse_grocery_json(grocery_output):
         cleaned_output = cleaned_output.removeprefix("json").strip()
 
     return json.loads(cleaned_output)
+
+DEFAULT_SABZI_ITEMS = [
+    {"name_hi": "फूलगोभी", "name_en": "gobhi", "quantity": "1"},
+    {"name_hi": "भिंडी", "name_en": "bhindi", "quantity": "1"},
+    {"name_hi": "बीन्स", "name_en": "beans", "quantity": "1"},
+    {"name_hi": "गाजर", "name_en": "carrot", "quantity": "1"},
+]
+
+SABZI_NAMES = {
+    "sabzi",
+    "sabji",
+    "sabjis",
+    "vegetable",
+    "vegetables",
+    "mixed vegetables",
+    "सब्जी",
+    "सब्जियां",
+    "सब्जियाँ",
+}
+
+def expand_default_sabzi_items(items):
+    expanded_items = []
+    for item in items:
+        if isinstance(item, str):
+            item_name = item
+        else:
+            item_name = " ".join(
+                str(item.get(key, ""))
+                for key in ("name_en", "name_hi", "name")
+            )
+
+        normalized_name = item_name.lower().strip()
+        if normalized_name in SABZI_NAMES or any(name in normalized_name.split() for name in SABZI_NAMES):
+            expanded_items.extend(DEFAULT_SABZI_ITEMS)
+        else:
+            expanded_items.append(item)
+
+    return expanded_items
 
 def extract_items_from_audio_files(audio_paths):
     transcript_parts = []
@@ -133,7 +235,7 @@ def extract_items_from_audio_files(audio_paths):
     grocery_json = parse_grocery_json(grocery_output)
     return {
         "transcript": transcript,
-        "items": grocery_json.get("items", []),
+        "items": expand_default_sabzi_items(grocery_json.get("items", [])),
     }
 
 def main():
