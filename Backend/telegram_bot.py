@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from app import convert_audio_to_mp3, extract_items_from_audio_files
+from app import convert_audio_to_mp3, extract_items_from_audio_files, parse_cart_edit_command
 from order_backends import OrderingBackend
+from order_history import append_confirmed_order_history
 
 BASE_DIR = Path(__file__).resolve().parent
 AUDIO_DIR = BASE_DIR / "audio"
@@ -17,7 +18,7 @@ load_dotenv(BASE_DIR / ".env")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.getenv("ALLOWED_CHAT_ID")
-TELEGRAM_POLL_SECONDS = int(os.getenv("TELEGRAM_POLL_SECONDS", "300"))
+TELEGRAM_POLL_SECONDS = int(os.getenv("TELEGRAM_POLL_SECONDS", "600"))
 BATCH_WAIT_SECONDS = int(os.getenv("TELEGRAM_BATCH_WAIT_SECONDS", "20"))
 
 pending_approvals = {}
@@ -40,6 +41,64 @@ def safe_unlink(path):
         pass
 
 
+def build_order_summary_lines(summary):
+    cart_items = summary.get("cart_items", [])
+    bill_lines = summary.get("bill_lines", [])
+    cart_item_breakup = summary.get("cart_item_breakup", [])
+    bill_breakup = summary.get("bill_breakup", [])
+    summary_lines = ["Order summary breakup:"]
+    if cart_item_breakup:
+        summary_lines.append("Items:")
+        for item in cart_item_breakup[:20]:
+            name = item.get("name", "")
+            variant = item.get("variant", "")
+            quantity = item.get("quantity", 1)
+            price = item.get("price", "")
+            mrp = item.get("mrp", "")
+            savings = item.get("savings", "")
+            details = " | ".join(part for part in [variant, f"qty {quantity}", price] if part)
+            if mrp:
+                details += f" (MRP {mrp}"
+                if savings:
+                    details += f", saved {savings}"
+                details += ")"
+            summary_lines.append(f"- {name}: {details}")
+    elif cart_items:
+        summary_lines.append("Items:")
+        for line in cart_items[:20]:
+            summary_lines.append(f"- {line}")
+    if bill_breakup:
+        summary_lines.append("Bill details:")
+        for line in bill_breakup[:20]:
+            label = line.get("label", "")
+            amount = line.get("amount", "")
+            details = line.get("details", "")
+            value = amount or details
+            summary_lines.append(f"- {label}: {value}")
+    elif bill_lines:
+        summary_lines.append("Bill details:")
+        for line in bill_lines[:20]:
+            summary_lines.append(f"- {line}")
+    return summary_lines
+
+
+async def send_cart_review(bot, chat_id, result, caption):
+    summary = result.raw.get("order_summary", {})
+    screenshot_parts = result.raw.get("screenshot_paths", [])
+    for index, part_path in enumerate(screenshot_parts):
+        with Path(part_path).open("rb") as screenshot:
+            part_caption = caption if index == 0 else f"Cart screenshot part {index + 1}"
+            await bot.send_photo(chat_id=chat_id, photo=screenshot, caption=part_caption)
+        safe_unlink(part_path)
+    summary_lines = build_order_summary_lines(summary)
+    summary_lines.extend([
+        "",
+        "Next: reply OK to continue, CANCEL to stop.",
+        "You can also say things like: add 2 maggi, remove diet coke.",
+    ])
+    await bot.send_message(chat_id=chat_id, text="\n".join(summary_lines))
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed_chat(update):
         await update.message.reply_text("This bot is not enabled for this chat.")
@@ -47,7 +106,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Send me a Hindi grocery voice note. I will create a Blinkit cart and send a screenshot for approval.\n\n"
-        "After the cart is ready, send an address hint like 'flat 1202 tower A', then reply OK to place a COD order."
+        "After the cart is ready, reply OK. I will then ask for an address hint like 'flat 1202 tower A'."
     )
 
 
@@ -129,61 +188,20 @@ async def process_audio_batch(chat_id, bot):
             "screenshot_path": str(screenshot_path),
             "result": result,
             "address_hint": None,
+            "awaiting_address_hint": False,
+            "cart_edits": [],
         }
 
         caption = (
-            "Blinkit cart is ready. Send address hint, then reply OK to place COD order.\n\n"
+            "Blinkit cart is ready. Reply OK to continue, or CANCEL to stop.\n"
+            "You can also ask me to add or remove items, for example: add 2 maggi, or remove diet coke.\n\n"
             "Reply CANCEL to cancel."
         )
         if result.failed_items:
             failed = "\n".join(f"- {entry['item']}: {entry['error']}" for entry in result.failed_items)
             caption += "\n\nSome items failed:\n" + failed
 
-        summary = result.raw.get("order_summary", {})
-        cart_items = summary.get("cart_items", [])
-        bill_lines = summary.get("bill_lines", [])
-        cart_item_breakup = summary.get("cart_item_breakup", [])
-        bill_breakup = summary.get("bill_breakup", [])
-        summary_lines = ["Order summary breakup:"]
-        if cart_item_breakup:
-            summary_lines.append("Items:")
-            for item in cart_item_breakup[:20]:
-                name = item.get("name", "")
-                variant = item.get("variant", "")
-                quantity = item.get("quantity", 1)
-                price = item.get("price", "")
-                mrp = item.get("mrp", "")
-                savings = item.get("savings", "")
-                details = " | ".join(part for part in [variant, f"qty {quantity}", price] if part)
-                if mrp:
-                    details += f" (MRP {mrp}"
-                    if savings:
-                        details += f", saved {savings}"
-                    details += ")"
-                summary_lines.append(f"- {name}: {details}")
-        elif cart_items:
-            summary_lines.append("Items:")
-            for line in cart_items[:20]:
-                summary_lines.append(f"- {line}")
-        if bill_breakup:
-            summary_lines.append("Bill details:")
-            for line in bill_breakup[:20]:
-                label = line.get("label", "")
-                amount = line.get("amount", "")
-                details = line.get("details", "")
-                value = amount or details
-                summary_lines.append(f"- {label}: {value}")
-        elif bill_lines:
-            summary_lines.append("Bill details:")
-            for line in bill_lines[:20]:
-                summary_lines.append(f"- {line}")
-        screenshot_parts = result.raw.get("screenshot_paths", [])
-        for index, part_path in enumerate(screenshot_parts):
-            with Path(part_path).open("rb") as screenshot:
-                part_caption = caption if index == 0 else f"Cart screenshot part {index + 1}"
-                await bot.send_photo(chat_id=chat_id, photo=screenshot, caption=part_caption)
-            safe_unlink(part_path)
-        await bot.send_message(chat_id=chat_id, text="\n".join(summary_lines))
+        await send_cart_review(bot, chat_id, result, caption)
     except Exception as exc:
         await bot.send_message(chat_id=chat_id, text=f"Batch failed: {exc}")
     finally:
@@ -205,26 +223,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No cart is waiting for approval.")
             return
 
-        approval = pending_approvals.get(chat_id, {})
-        address_hint = approval.get("address_hint")
-        if not address_hint:
-            await update.message.reply_text(
-                "Send the delivery address hint first, for example: flat 1202 tower A. Then reply OK."
-            )
+        if pending_approvals[chat_id].get("awaiting_address_hint"):
+            await update.message.reply_text("Send the delivery address hint, for example: flat 1202 tower A.")
             return
 
-        await update.message.reply_text("Approved. Selecting saved address and placing COD order...")
-        try:
-            checkout_result = await asyncio.to_thread(ordering_backend.checkout_cod, address_hint)
-            pending_approvals.pop(chat_id, None)
-            address_result = checkout_result.raw.get("address_result", {})
-            matched_address = address_result.get("matched_address", "")
-            message = "COD order placed."
-            if matched_address:
-                message += "\nMatched address:\n" + matched_address
-            await update.message.reply_text(message)
-        except Exception as exc:
-            await update.message.reply_text(f"Checkout failed: {exc}")
+        pending_approvals[chat_id]["awaiting_address_hint"] = True
+        await update.message.reply_text(
+            "Approved. Send the delivery address hint now, for example: flat 1202 tower A."
+        )
         return
 
     if text == "CANCEL":
@@ -235,10 +241,98 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No cart is waiting for approval.")
         return
 
+    if chat_id in pending_approvals and pending_approvals[chat_id].get("awaiting_address_hint") and raw_text:
+        approval = pending_approvals.get(chat_id, {})
+        address_hint = raw_text
+        approval["address_hint"] = address_hint
+
+        await update.message.reply_text("Address hint received. Selecting saved address and placing COD order...")
+        try:
+            checkout_result = await asyncio.to_thread(ordering_backend.checkout_cod, address_hint)
+            history_path = append_confirmed_order_history(update, approval, checkout_result)
+            pending_approvals.pop(chat_id, None)
+            address_result = checkout_result.raw.get("address_result", {})
+            matched_address = address_result.get("matched_address", "")
+            message = "COD order placed."
+            if matched_address:
+                message += "\nMatched address:\n" + matched_address
+            message += f"\nSaved order history: {history_path.name}"
+            await update.message.reply_text(message)
+        except Exception as exc:
+            await update.message.reply_text(f"Checkout failed: {exc}")
+        return
+
     if chat_id in pending_approvals and raw_text:
-        pending_approvals[chat_id]["address_hint"] = raw_text
+        edit_command = parse_cart_edit_command(raw_text)
+        if edit_command.get("action") == "add_item":
+            item_name = edit_command.get("item_name", "")
+            quantity = edit_command.get("quantity") or "1"
+            await update.message.reply_text(f"Adding {item_name} ({quantity}) to cart...")
+            try:
+                screenshot_path = SCREENSHOT_DIR / f"cart_{chat_id}_{update.effective_message.message_id}_updated.png"
+                previous_result = pending_approvals[chat_id].get("result")
+                result = await asyncio.to_thread(
+                    ordering_backend.add_item,
+                    item_name,
+                    quantity,
+                    str(screenshot_path),
+                )
+                if previous_result:
+                    result.added_items = previous_result.added_items + result.added_items
+                    result.failed_items = previous_result.failed_items + result.failed_items
+                pending_approvals[chat_id]["result"] = result
+                pending_approvals[chat_id]["screenshot_path"] = str(screenshot_path)
+                pending_approvals[chat_id]["awaiting_address_hint"] = False
+                pending_approvals[chat_id].setdefault("items", []).append({
+                    "name_en": item_name,
+                    "quantity": quantity,
+                })
+                pending_approvals[chat_id].setdefault("cart_edits", []).append({
+                    "action": "add_item",
+                    "item_name": item_name,
+                    "quantity": quantity,
+                    "result": result.raw.get("add_result", {}),
+                })
+                caption = (
+                    f"Updated cart after adding {item_name} ({quantity}).\n"
+                    "Reply OK to continue, or CANCEL to stop.\n"
+                    "You can ask me to add/remove another item, or reply CANCEL."
+                )
+                await send_cart_review(context.bot, chat_id, result, caption)
+            except Exception as exc:
+                await update.message.reply_text(f"Could not add item: {exc}")
+            return
+
+        if edit_command.get("action") == "remove_item":
+            item_name = edit_command.get("item_name", "")
+            await update.message.reply_text(f"Removing {item_name} from cart...")
+            try:
+                screenshot_path = SCREENSHOT_DIR / f"cart_{chat_id}_{update.effective_message.message_id}_updated.png"
+                previous_result = pending_approvals[chat_id].get("result")
+                result = await asyncio.to_thread(ordering_backend.remove_item, item_name, str(screenshot_path))
+                if previous_result:
+                    result.added_items = previous_result.added_items
+                    result.failed_items = previous_result.failed_items
+                pending_approvals[chat_id]["result"] = result
+                pending_approvals[chat_id]["screenshot_path"] = str(screenshot_path)
+                pending_approvals[chat_id]["awaiting_address_hint"] = False
+                pending_approvals[chat_id].setdefault("cart_edits", []).append({
+                    "action": "remove_item",
+                    "item_name": item_name,
+                    "result": result.raw.get("remove_result", {}),
+                })
+                caption = (
+                    f"Updated cart after removing {item_name}.\n"
+                    "Reply OK to continue, or CANCEL to stop.\n"
+                    "You can ask me to add/remove another item, or reply CANCEL."
+                )
+                await send_cart_review(context.bot, chat_id, result, caption)
+            except Exception as exc:
+                await update.message.reply_text(f"Could not remove item: {exc}")
+            return
+
         await update.message.reply_text(
-            f"Address hint saved: {raw_text}\nReply OK to place COD order, or CANCEL to cancel."
+            "Reply OK to continue, CANCEL to stop, or ask me to add/remove an item."
         )
         return
 
